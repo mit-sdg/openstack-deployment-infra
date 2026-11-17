@@ -107,6 +107,7 @@ class AppManagement:
             ("GET", "/v1/apps/{app}/resize-plan", self.resize_plan),
             ("GET", "/v1/apps/{app}/builder-size", self.builder_size),
             ("PUT", "/v1/apps/{app}/builder-size", self.set_builder_size),
+            *b.snapshots.routes(),
         ]
 
     def handle(self, request: Request, handler: Callable[[Request], Response]) -> Response:

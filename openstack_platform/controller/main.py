@@ -20,6 +20,7 @@ from ..installation import (
     DEFAULT_CONTROLLER_STATE,
 )
 from . import database as db
+from . import storage_exports
 from .api import ControllerAPI
 from .http import DEFAULT_MAX_CONNECTIONS_PER_PEER, ControllerServer, PeerPolicy
 from .storage_limits import FAST_COLLECT_SECONDS, StorageLimitsService
@@ -156,7 +157,16 @@ def main(argv: list[str] | None = None) -> int:
                         logging.getLogger(__name__).warning("storage usage collection cycle failed")
                     stopping.wait(FAST_COLLECT_SECONDS)
 
-        threads = [threading.Thread(target=collect_usage, name="controller-storage-usage")] + [
+        def sweep_exports() -> None:
+            assert api is not None
+            while not stopping.is_set():
+                storage_exports.sweep(config, api.helper_caller)
+                stopping.wait(storage_exports.SWEEP_SECONDS)
+
+        threads = [
+            threading.Thread(target=collect_usage, name="controller-storage-usage"),
+            threading.Thread(target=sweep_exports, name="controller-snapshot-sweep"),
+        ] + [
             threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2})
             for server in servers
         ]

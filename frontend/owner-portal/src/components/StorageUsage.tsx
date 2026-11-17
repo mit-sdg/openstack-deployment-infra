@@ -25,7 +25,7 @@ import { Status } from './Status';
 import { storageLimitFailure } from './storageLimitsErrors';
 
 const numbers = new Intl.NumberFormat('en-US');
-const bytes = (value: number) =>
+export const bytes = (value: number) =>
   value < 1024
     ? `${numbers.format(value)} B`
     : value < 1024 ** 2

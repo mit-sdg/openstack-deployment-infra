@@ -24,6 +24,8 @@ These are per-instance limits on a shared host, not separate storage VMs. A host
 
 S3 buckets share one Garage service. Each app receives an access key limited to its bucket, with byte and object quotas. [How it works](how-it-works.md#where-data-lives) explains where data and credentials live.
 
+Staff and admins can download a snapshot of an app's database, which includes the personal data of the app's users. Owners can't. Each request and each download link is written to the audit log, links work for five minutes, and the platform deletes each snapshot after a day. Snapshots sit in a private bucket that only the helper's own key can use and that backups skip. See [staff database snapshots](reference/internals.md#staff-database-snapshots).
+
 ### The owner portal
 
 - **The website has limited access.** `management-web` serves pages and forwards requests. It can't reach the controller, the identity service, or the portal database.
@@ -44,6 +46,7 @@ Configuration can shorten the session limits.
 | Action | Portal authority | Extra check |
 | --- | --- | --- |
 | Delete storage | Staff or admin | Type the app slug and resource type; no step-up |
+| Download a database snapshot | Staff or admin | Read the personal-data notice; every request and download link is audited |
 | Delete an entire app, including manual resume | Admin only | Type the exact app slug and have current step-up |
 | Create or change accounts | Admin only | Current step-up |
 | Other shared app management | Staff or admin | No password or authenticator confirmation |

@@ -30,7 +30,7 @@ The portal automatically retries brief load failures. If a refresh fails after a
 Staff and portal admins open the same app pages as owners without joining the team:
 
 - **Overview** shows the current deployment, activity and start, stop and restart controls. Staff and admins also see **Machines**, with the worker and effective build machine.
-- **Settings** holds repository and runtime settings, deploy keys, environment variables, databases and storage. Staff and admins additionally get **Danger zone**, with **Change owner** and storage deletion. Only admins see **Delete app**.
+- **Settings** holds repository and runtime settings, deploy keys, environment variables, databases and storage. Staff and admins additionally get **Download snapshot** for each database, and **Danger zone**, with **Change owner** and storage deletion. Only admins see **Delete app**.
 - **Deploy** lets you choose a commit, review it, and deploy. Staff and admins additionally get the deployment method, worker size, and a read-only build machine summary.
 - **Deployments** lists attempts. Open one to see its details and build output.
 - **Logs** shows runtime output and errors.
@@ -101,6 +101,29 @@ The portal calls broker `POST /v1/apps/{app}/delete` with the exact slug as `con
 4. In **Settings** > **Danger zone**, select **Delete**. Choose the resource under **Database or storage**.
 5. Type the app's name, a space, and the storage type, for example `my-app postgres` (the types are `postgres`, `mongo`, and `s3`). Select **Delete permanently**.
 6. Check **Overview** activity until it shows success. Check that the resource is gone from **Databases and storage**, then deploy the prepared commit with the saved settings.
+
+### Download a database snapshot
+
+A snapshot is a zip of everything in one of an app's databases. Use it to debug an app, or to see what people actually stored in it, for example during user testing. App owners and teammates can't take or download snapshots.
+
+> [!IMPORTANT]
+> A snapshot holds the personal data of everyone who used the app. Every request and every download appears in **Audit log** under your name. Keep your copy private and delete it when you're done.
+
+1. Open the app's **Settings** > **Databases and storage**.
+2. Select **Download snapshot** beside the PostgreSQL or MongoDB database.
+3. Read the notice and select **Take snapshot**. A small database takes a few seconds; a large one can take a few minutes.
+4. When **Snapshot ready** appears, select **Download**. Each download gets a new link that works for five minutes, so you can download again while the snapshot exists.
+
+The platform deletes each snapshot a day after it's taken. Each staff member can take three snapshots of a database an hour, and the platform prepares one snapshot at a time, so you may need to wait a few minutes. A database larger than 2 GiB can't be exported this way; ask an operator.
+
+The zip contains `MANIFEST.json`, with the app, the time taken, and a SHA-256 checksum and size for each file.
+
+| Database | Files |
+| --- | --- |
+| MongoDB | `collections/<name>.jsonl`, one document per line in relaxed Extended JSON, and `mongodump.archive.gz`, which `mongorestore --archive --gzip` can load into a scratch database |
+| PostgreSQL | `database.sql`, a plain SQL dump of the schema and data that `psql` can load into an empty database |
+
+MongoDB documents keep their `_id`, so an ObjectId still shows when each document was created. Collections are read one after another while the app runs, so a busy app's collections can differ by a few seconds.
 
 ### Edit storage limits (portal admins only)
 

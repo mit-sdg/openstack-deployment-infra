@@ -35,6 +35,7 @@ from .database import Database
 from .journal import Journal, intent_model
 from .members import Members, activity
 from .runtime_logs import RuntimeLogs
+from .snapshots import Snapshots
 from .source_keys import SourceKeys
 from .storage_limits import StorageLimits
 
@@ -93,6 +94,7 @@ class Broker:
         self.app_management = AppManagement(self)
         self.builder_settings = BuilderSettings(self)
         self.storage_limits = StorageLimits(self)
+        self.snapshots = Snapshots(self)
         self.runtime_logs = RuntimeLogs(self)
         self.source_keys = SourceKeys(self)
         self.members = Members(self)
@@ -194,6 +196,9 @@ class Broker:
                         "/v1/apps/{app}/sizes",
                         "/v1/apps/{app}/resize-plan",
                         "/v1/apps/{app}/builder-size",
+                        "/v1/apps/{app}/storage/{resource}/snapshots",
+                        "/v1/apps/{app}/storage/{resource}/snapshots/{snapshot}",
+                        "/v1/apps/{app}/storage/{resource}/snapshots/{snapshot}/link",
                     }:
                         return self.app_management.handle(request, handler)
                     if (

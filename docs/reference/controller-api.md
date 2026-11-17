@@ -97,7 +97,7 @@ Poll the `statusUrl` until `status` is no longer `running`. The returned URL use
 | --- | --- |
 | `operationId` | The operation ID (the request's idempotency key) |
 | `kind` | For example `app.deploy`, `app.enable`, `app.env.set`, `storage.create`, `infra.image.set` |
-| `scope` | `app-<application ID>`, `infrastructure`, or `storage-abort`; one foreground operation and one accepted finishing operation can be unfinished per app |
+| `scope` | `app-<application ID>`, `infrastructure`, `storage-abort`, or `export-<resource ID>` for staff snapshots; one foreground operation and one accepted finishing operation can be unfinished per app |
 | `status` | `running`, `succeeded`, `failed`, or `recovery_required` |
 | `phase` | The last recorded step; `queued`, `executing`, `startup_interrupted`, or `finishing` before the domain service records its own |
 | `startedAt`, `updatedAt`, `deadlineAt` | Timestamps |
@@ -251,6 +251,9 @@ Deletion stops the workload, purges every app-owned database and S3 bucket (incl
 | `PATCH /v1/storage/{id}/label` | project | yes | Change the display label: `{"displayLabel": "..."}`; returns `200` |
 | `POST /v1/storage/{id}/verify` | project | yes | Verify provider identity and health |
 | `POST /v1/storage/{id}/rotate` | project | yes | Issue new scoped credentials, check the app's health with them, then retire the old ones |
+| `POST /v1/storage/{id}/exports` | project | yes | Take a staff snapshot of an active PostgreSQL or MongoDB database on its own instance; async `storage.export` in scope `export-<resource ID>` |
+| `GET /v1/storage/{id}/exports/{operation}` | project | no | Snapshot progress: `status` (`running`, `succeeded`, `failed`, or `expired`), `errorCode`, and once it succeeds `export` with `filename`, `bytes`, `sha256`, `takenAt`, and `expiresAt` |
+| `POST /v1/storage/{id}/exports/{operation}/link` | project | no | A new download link for a finished snapshot, valid for five minutes, with the same file details; `409 EXPORT_NOT_READY` before it finishes and `410 EXPORT_EXPIRED` after its day |
 | `DELETE /v1/storage/{id}` | project | yes | Delete the resource: `{"confirmation": "<resource name>", "purge": false}`; `purge: true` empties an S3 bucket first; without it a non-empty bucket is refused. The portal requires staff/admin authority, typed confirmation, and no saved storage bindings. |
 | `GET /v1/admin/storage` | privileged | no | Paged list of every resource, including provider identifiers and safe usage errors |
 | `POST /v1/admin/storage/migrate-instances` | privileged | yes | Quiesce, copy, verify, publish isolated endpoints and refresh accepted jobs; never delete shared source data |
@@ -338,6 +341,12 @@ applicationIds selection and returns 202 with admin operation polling. Journal k
 It unfreezes checkpointed source roles, restarts the shared accepted job, retains
 source/target data and releases the old reservation. After publication the operation fails with a safe `MIGRATION_ALREADY_PUBLISHED` summary; replay the original migration instead. Admin resource
 migrationState can also be `aborted`; resource delete then cleans the retained target.
+
+#### Staff snapshots
+
+The portal offers these routes to staff and admins only; the broker refuses app owners and teammates. A snapshot reads one database through the helper and uploads a zip to a private Garage bucket. The operation keeps the object key, size, checksum, and time taken in its refs, and the routes return everything except the object key. Download links are signed for `https://s3.<domain>` when someone asks for one and are never stored.
+
+Snapshots run in the scope `export-<resource ID>`, so a snapshot neither waits for nor blocks the app's deploys and storage changes. One snapshot runs at a time across the platform; a second request gets `409 EXPORT_BUSY`, which is safe to retry later. Only active `mongo` and `postgres` resources with their own instance qualify (`409 EXPORT_UNSUPPORTED` or `409 EXPORT_UNAVAILABLE`). A failed snapshot reports `errorCode` `EXPORT_TOO_LARGE` (over 2 GiB), `INSTANCE_NOT_READY`, `INSTANCE_MANAGER_UNAVAILABLE`, `DEADLINE_EXPIRED`, or `EXPORT_FAILED`. Snapshots change nothing, so an interrupted one ends as failed when the controller restarts or the next snapshot of that database starts; it never waits for recovery. Every hour the controller asks the helper to delete snapshots older than a day.
 
 ### Operations
 
