@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import json
-import os
 import stat
 import sys
 import tempfile
@@ -389,7 +388,8 @@ class ProductionExportTests(unittest.TestCase):
             "mongodump",
             f'echo "$@" > {self.argv_log}\nprintf "archive"\n',
         )
-        self.enterContext(mock.patch.dict(os.environ, {"PLATFORM_DATABASE_TOOLS": str(tools)}))
+        self.enterContext(mock.patch.object(production, "DATABASE_TOOLS", str(tools)))
+        self.enterContext(mock.patch.object(production, "TOOL_STORE", self.root))
         self.runtime = SimpleNamespace(
             root=self.root,
             admin_state=self.state,
@@ -483,7 +483,7 @@ class ProductionExportTests(unittest.TestCase):
         with self.assertRaises(HelperActionError) as wrong:
             handler(export_args())
         self.assertEqual(wrong.exception.code, "IDENTITY_MISMATCH")
-        with mock.patch.dict(os.environ, {"PLATFORM_DATABASE_TOOLS": str(self.root / "none")}):
+        with mock.patch.object(production, "DATABASE_TOOLS", str(self.root / "none")):
             with self.assertRaises(HelperActionError) as missing:
                 handler(export_args())
         self.assertEqual(missing.exception.code, "DEPENDENCY_UNAVAILABLE")

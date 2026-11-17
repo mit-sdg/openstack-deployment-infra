@@ -176,16 +176,9 @@ let
   # rule repoints that name at this launcher on every boot. Running the helper
   # module from here would drop PLATFORM_CONFIG, which the helper requires, so
   # every helper call would fail after any admin replacement. Hand over to the
-  # accepted release's own launcher, which validates and exports it. Staff
-  # snapshots run pg_dump and mongodump from these pinned packages by path.
+  # accepted release's own launcher, which validates and exports it.
   helperLauncher = pkgs.writeShellScriptBin "openstack-platform-helper" ''
     set -eu
-    export PLATFORM_DATABASE_TOOLS=${
-      pkgs.lib.makeBinPath [
-        pkgs.postgresql_17
-        pkgs.mongodb-tools
-      ]
-    }
     release=${platform.paths.adminState}/operator/helper-releases/current
     if [[ ! -f "$release/.complete" ]]; then
       echo "no accepted helper release" >&2

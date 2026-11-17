@@ -1589,19 +1589,24 @@ def _staff_export_clients(runtime: HelperRuntime, *, create: bool) -> tuple[str,
     )
 
 
-def _database_tools() -> dict[str, str]:
-    """pg_dump and mongodump from the Nix packages the helper launcher names."""
+# The admin image publishes pinned pg_dump and mongodump here. A fixed path
+# keeps them available whichever launcher started the helper.
+DATABASE_TOOLS = "/etc/{namespace}/database-tools/bin"
+TOOL_STORE = Path("/nix/store")
+
+
+def _database_tools(namespace: str) -> dict[str, str]:
+    """pg_dump and mongodump, resolved into the Nix store."""
+    directory = Path(DATABASE_TOOLS.format(namespace=namespace))
     found: dict[str, str] = {}
-    for directory in os.environ.get("PLATFORM_DATABASE_TOOLS", "").split(":"):
-        for name in ("pg_dump", "mongodump"):
-            candidate = Path(directory) / name
-            if (
-                name not in found
-                and candidate.is_absolute()
-                and candidate.is_file()
-                and os.access(candidate, os.X_OK)
-            ):
-                found[name] = str(candidate)
+    for name in ("pg_dump", "mongodump"):
+        candidate = (directory / name).resolve()
+        if (
+            candidate.is_relative_to(TOOL_STORE)
+            and candidate.is_file()
+            and os.access(candidate, os.X_OK)
+        ):
+            found[name] = str(candidate)
     if len(found) != 2:
         raise HelperActionError("DEPENDENCY_UNAVAILABLE", "database export tools are unavailable")
     return found
@@ -1615,7 +1620,7 @@ def _storage_export(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
     request = staff_exports.export_request(args, kind)
     _deadline_at, deadline = _operation_deadline(args["deadlineAt"])
     runtime = helper_runtime()
-    tools = _database_tools()
+    tools = _database_tools(runtime.platform.namespace)
     instances = _instance_client()
     if instances.call("observe", request.instance_id).get("type") != kind:
         raise HelperActionError("IDENTITY_MISMATCH", "storage instance type does not match")
