@@ -48,6 +48,9 @@ _HELPER_FAILURE_CODES = frozenset(
         "ENVIRONMENT_CONFLICT",
         "ENVIRONMENT_HEALTH_FAILED",
         "ENVIRONMENT_ROLLBACK_FAILED",
+        "EXPORT_FAILED",
+        "EXPORT_NOT_FOUND",
+        "EXPORT_TOO_LARGE",
         "EXTERNAL_OPERATION_FAILED",
         "HELPER_ACTION_FAILED",
         "IDENTITY_MISMATCH",
@@ -132,6 +135,8 @@ def logged_helper(caller: HelperCaller, *, config_shaped: bool = True) -> Helper
                     "storage.instances.migrate",
                     "storage.instances.abort",
                     "storage.instances.available",
+                    "storage.export.link",
+                    "storage.export.sweep",
                 }
                 or action
                 in {
@@ -145,6 +150,7 @@ def logged_helper(caller: HelperCaller, *, config_shaped: bool = True) -> Helper
                         "remove",
                         "limits",
                         "usage",
+                        "export",
                     )
                 }
             )

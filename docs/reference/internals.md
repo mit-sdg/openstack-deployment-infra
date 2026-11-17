@@ -298,6 +298,7 @@ The portal routes are `/apps`, `/all-apps`, `/people`, `/people/:id`, `/activity
 | Accounts, roles, quotas, account audit | No | No | Yes |
 | Create an app for another owner | No | Yes | Yes |
 | Adopt an operator-created app, reassign an owner, delete storage | No | Yes | Yes |
+| Take and download a database snapshot | No | Any app | Any app |
 | Maintenance outage, worker size, or app build machine | No | Yes | Yes |
 | Default build machine | No | No | Yes |
 | Delete an entire app (with step-up) | No | No | Yes |
@@ -398,6 +399,7 @@ Implemented actions must exactly match the release-bound [`actions-v1.txt`](../.
 | Registry | `app.manifest.retain`, `app.manifest.verify`, `app.manifest.delete` |
 | Source | `app.source.key`, `app.source.check`, `app.source.commits`, `app.source.preflight` |
 | Managed storage | `storage.<type>.create`, `.observe`, `.usage`, `.limits`, `.verify`, `.rotate`, `.remove` for `postgres`, `mongo`, and `s3`; `storage.host.observe` reads authenticated host metrics |
+| Staff snapshots | `storage.mongo.export`, `storage.postgres.export`, `storage.export.link`, `storage.export.sweep` ([staff database snapshots](#staff-database-snapshots)) |
 | Instance migration and networking | `storage.instances.available`, `.migrate`, `.abort`, `.network` |
 | Backups | `backup.accept` (operator-state upload), `storage.backup.ensure` (resource checkpoint) |
 
@@ -631,6 +633,20 @@ Failed S3 creation verifies the exact candidate bucket, alias, app key, endpoint
 | Admin backup traffic | Exempt from these fairness limits |
 
 Public S3 uses `s3.<domain>`. Apps receive both internal and public endpoint outputs through the storage binding contract. The ingress proxy preserves the signed host and verifies storage TLS.
+
+### Staff database snapshots
+
+Staff and admins can download a copy of an app's PostgreSQL or MongoDB database from **Settings** > **Databases and storage**. They use it to debug an app or to check what an app's users actually stored, for example during user testing. The copy contains those people's data, so the platform keeps it private, short-lived, and audited.
+
+1. The broker accepts `POST /api/v1/apps/{app}/storage/{resource}/snapshots` only from a staff or admin session with a CSRF token. It allows three requests per staff member, database, and hour, starts controller `POST /v1/storage/{id}/exports`, and writes `storage_snapshot_requested` to `admin_audit` with the actor, the owner as target, the app slug, and the resource and snapshot IDs.
+2. The controller runs `storage.mongo.export` or `storage.postgres.export`. The helper checks that the database name derives from the app and resource it was given and that the instance has the expected type, then reads the instance's admin credentials from the storage instance manager.
+3. The helper writes into a private directory under `<adminState>/controller/staff-exports/work/`. For MongoDB that is one JSON Lines file per collection in relaxed Extended JSON, so ObjectIds and dates stay visible, plus a `mongodump --archive --gzip` of the app database without its users and roles. For PostgreSQL it is a plain `pg_dump --no-owner --no-privileges`. `pg_dump` reads from one transaction snapshot; MongoDB collections are read one after another while the app keeps running. `MANIFEST.json` names the app, resource, database type, and time taken, with each file's size and SHA-256 and each collection's document count.
+4. All the files together may use at most 2 GiB (`EXPORT_TOO_LARGE`), and the admin host needs twice that free. The helper zips the files, uploads the zip, removes its work directory, and deletes snapshots older than a day. The result holds only the object key, file name, size, SHA-256, and time.
+5. The portal polls the snapshot. When someone selects **Download**, the broker asks for a link, writes `storage_snapshot_link_issued` with the file's SHA-256 and size, and only then returns it. `storage.export.link` signs a five-minute GET for `https://s3.<domain>` after checking that the object exists and is under a day old. The object carries `Content-Disposition: attachment`, so the browser saves the file.
+
+Snapshots live in the bucket `staff-exports-<namespace>`. Its name sits outside the `<prefix>-` names that managed-data backups copy, so snapshots are never backed up or restored. The helper creates the bucket on the first snapshot with a 20 GiB quota and no website access, together with a Garage key named `platform-staff-exports-<namespace>` that can read and write that bucket only. The key's secret stays in `<adminState>/controller/staff-exports/garage-key.env` (mode 0600). A key whose secret was lost is deleted and replaced. `pg_dump` and `mongodump` come from the helper launcher, which names the pinned Nix packages in `PLATFORM_DATABASE_TOOLS`. The controller runs `storage.export.sweep` every hour, which also removes work directories left by a stopped helper.
+
+Implementation: [`helper/staff_exports.py`](../../openstack_platform/helper/staff_exports.py), [`controller/storage_exports.py`](../../openstack_platform/controller/storage_exports.py), and [`broker/snapshots.py`](../../openstack_platform/management/broker/snapshots.py).
 
 The private OCI registry shares the storage data volume. Its images are rebuildable from Git and are excluded from managed-data backups. On 2026-10-10 it used approximately 34 GB of the volume’s 45 GB used space; that is a live observation, not a capacity setting.
 

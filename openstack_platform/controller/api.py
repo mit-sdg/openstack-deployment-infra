@@ -9,6 +9,7 @@ from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager, nullcontext
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -27,7 +28,15 @@ from ..validation import (
     uuid,
 )
 from . import application_runtime as app
-from . import builder_settings, fixed_ip_service, sizing, status, storage, storage_limits
+from . import (
+    builder_settings,
+    fixed_ip_service,
+    sizing,
+    status,
+    storage,
+    storage_exports,
+    storage_limits,
+)
 from . import database as db
 from .application_service import ApplicationService
 from .async_operations import AsyncOperationExecutor
@@ -48,7 +57,13 @@ from .flavor_cache import FlavorCache
 from .http import HttpError, Request, Response, Router
 from .image_service import IMAGE_SELECTION_KIND, ImageSelectionService, hosted_role
 from .log_service import LogService
-from .service_support import ServiceDeadlineError, logged_helper, operation_deadline, wall_deadline
+from .service_support import (
+    ServiceDeadlineError,
+    logged_helper,
+    operation_deadline,
+    reject_deleting,
+    wall_deadline,
+)
 from .storage_contract import validate_expected_quotas, validate_quotas
 from .storage_instances import MIGRATE_KIND, InstanceMigrationService
 from .storage_limits import StorageLimitsService
@@ -360,6 +375,9 @@ class ControllerAPI:
             ("PATCH", "/v1/storage/{id}/label", self._label_storage),
             ("POST", "/v1/storage/{id}/verify", self._verify_storage),
             ("POST", "/v1/storage/{id}/rotate", self._rotate_storage),
+            ("POST", "/v1/storage/{id}/exports", self._export_storage),
+            ("GET", "/v1/storage/{id}/exports/{operation}", self._export_status),
+            ("POST", "/v1/storage/{id}/exports/{operation}/link", self._export_link),
             ("DELETE", "/v1/storage/{id}", self._delete_storage),
             ("GET", "/v1/operations/{id}", self._get_operation),
             ("GET", "/v1/admin/status", self._admin_status),
@@ -422,6 +440,8 @@ class ControllerAPI:
                 self._get_environment,
                 self._list_storage,
                 self._get_storage,
+                self._export_status,
+                self._export_link,
                 self._flavors,
                 self._builder_settings,
                 self._application_builder_size,
@@ -1653,6 +1673,55 @@ class ControllerAPI:
             ),
             kind=f"storage.{action}",
             scope=f"app-{resource.application_id}",
+        )
+
+    def _export_storage(self, request: Request) -> Response:
+        self._no_query(request)
+        self._body(request, allowed=set(), allow_absent=True)
+        claimed = self._claim(request)
+        if claimed.result_id is not None:
+            return self._operation_response(claimed.result_id)
+        resource = self._resource(self._path_uuid(request))
+        reject_deleting(self.connection, self._application(resource.application_id))
+        storage_exports.admit(self.connection, resource)
+        return self._external(
+            request,
+            lambda connection, key: storage_exports.run_export(
+                connection,
+                self.config,
+                resource.resource_id,
+                key,
+                helper_caller=self.helper_caller,
+            ),
+            kind=storage_exports.EXPORT_KIND,
+            scope=storage_exports.scope(resource.resource_id),
+            claimed=claimed,
+        )
+
+    def _export_status(self, request: Request) -> Response:
+        self._no_query(request)
+        if request.body is not None:
+            raise HttpError(400, "INVALID_BODY", "read routes do not accept a body")
+        resource_id = self._path_uuid(request)
+        operation_id = self._path_uuid(request, "operation")
+        with self._snapshot() as connection:
+            model = storage_exports.status_model(
+                connection, resource_id, operation_id, now=datetime.now(UTC)
+            )
+        return Response(200, model)
+
+    def _export_link(self, request: Request) -> Response:
+        self._no_query(request)
+        self._body(request, allowed=set(), allow_absent=True)
+        return Response(
+            200,
+            storage_exports.link(
+                self._snapshot,
+                self.config,
+                self._path_uuid(request),
+                self._path_uuid(request, "operation"),
+                helper_caller=self.helper_caller,
+            ),
         )
 
     def _delete_storage(self, request: Request) -> Response:

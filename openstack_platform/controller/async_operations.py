@@ -13,6 +13,8 @@ from . import database as db
 from . import finishing_retries
 
 OperationWork = Callable[[sqlite3.Connection], object]
+# Operations that change nothing outside their own record.
+READ_ONLY_KINDS = frozenset({"storage.export"})
 
 
 class AsyncOperationExecutor:
@@ -83,6 +85,17 @@ class AsyncOperationExecutor:
                 continue
             no_domain_intent = operation is None
             if operation is not None and operation.status in {"succeeded", "failed"}:
+                db.set_operation_dispatch_status(connection, dispatch.operation_id, "finished")
+                continue
+            if operation is not None and operation.kind in READ_ONLY_KINDS:
+                # Read-only work changed nothing, so it ends here; the person
+                # who asked for it can simply ask again.
+                db.mark_failed(
+                    connection,
+                    operation.operation_id,
+                    "controller stopped before the work finished",
+                    cleanup_state="not_required",
+                )
                 db.set_operation_dispatch_status(connection, dispatch.operation_id, "finished")
                 continue
             if operation is None:

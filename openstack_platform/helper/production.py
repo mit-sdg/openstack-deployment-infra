@@ -124,8 +124,15 @@ _PER_RESOURCE_STORAGE_ACTIONS = tuple(
     for resource_type in ("mongo", "postgres", "s3")
     for operation in ("create", "observe", "remove", "rotate", "verify", "limits", "usage")
 )
+_STAFF_EXPORT_ACTIONS = (
+    "storage.mongo.export",
+    "storage.postgres.export",
+    "storage.export.link",
+    "storage.export.sweep",
+)
 STORAGE_ACTIONS = (
     *_PER_RESOURCE_STORAGE_ACTIONS,
+    *_STAFF_EXPORT_ACTIONS,
     "storage.host.observe",
     "storage.backup.ensure",
     "storage.instances.network",
@@ -1518,8 +1525,235 @@ def _instance_network(args: Mapping[str, Any]) -> Mapping[str, Any]:
     return {"applied": True}
 
 
+def _staff_export_root(runtime: HelperRuntime) -> Path:
+    """Snapshot work and the exports key, beside build logs and deploy keys."""
+    controller = ensure_private_directory(runtime.admin_state / "controller", create=True)
+    return ensure_private_directory(controller / "staff-exports", create=True)
+
+
+def _staff_export_clients(runtime: HelperRuntime, *, create: bool) -> tuple[str, Any, Any] | None:
+    """The exports bucket with S3 clients for the internal and public endpoints.
+
+    Only an export creates the bucket and key. Links and sweeps find nothing
+    to do before the first export.
+    """
+    import boto3
+    from botocore.config import Config as BotoConfig
+
+    from ..controller.storage_contract import public_s3_endpoint
+    from . import staff_exports
+
+    platform = runtime.platform
+    host = platform.get("addresses.storage")
+    ca = str(_nomad_secrets(runtime) / "internal-ca.pem")
+    root = _staff_export_root(runtime)
+    bucket = staff_exports.bucket_name(platform.namespace, platform.prefix)
+    key_file = root / "garage-key.env"
+    if create:
+        secrets = _read_environment(runtime.root / "secrets/storage-bootstrap.env")
+        admin = _GarageAdmin(
+            f"https://{host}:{GARAGE_RPC_PORT}/v2",
+            secrets["GARAGE_ADMIN_TOKEN"],
+            ssl.create_default_context(cafile=ca),
+        )
+        access, secret = staff_exports.ensure_store(
+            admin,
+            bucket=bucket,
+            key_name=f"platform-staff-exports-{platform.namespace}",
+            key_file=key_file,
+            lock_file=root / "store.lock",
+        )
+    else:
+        stored = staff_exports.read_key(key_file)
+        if stored is None:
+            return None
+        access, secret = stored
+
+    def client(endpoint: str, **options: Any) -> Any:
+        return boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            region_name="garage",
+            aws_access_key_id=access,
+            aws_secret_access_key=secret,
+            config=BotoConfig(signature_version="s3v4", s3={"addressing_style": "path"}),
+            **options,
+        )
+
+    # Browsers reach Garage through public ingress, which keeps the Host the
+    # link was signed for.
+    return (
+        bucket,
+        client(f"https://{host}:{GARAGE_S3_PORT}", verify=ca),
+        client(public_s3_endpoint(platform.domain)),
+    )
+
+
+def _database_tools() -> dict[str, str]:
+    """pg_dump and mongodump from the Nix packages the helper launcher names."""
+    found: dict[str, str] = {}
+    for directory in os.environ.get("PLATFORM_DATABASE_TOOLS", "").split(":"):
+        for name in ("pg_dump", "mongodump"):
+            candidate = Path(directory) / name
+            if (
+                name not in found
+                and candidate.is_absolute()
+                and candidate.is_file()
+                and os.access(candidate, os.X_OK)
+            ):
+                found[name] = str(candidate)
+    if len(found) != 2:
+        raise HelperActionError("DEPENDENCY_UNAVAILABLE", "database export tools are unavailable")
+    return found
+
+
+def _storage_export(action: str, args: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Snapshot one app database into the private exports bucket."""
+    from . import staff_exports
+
+    kind = action.split(".")[1]
+    request = staff_exports.export_request(args, kind)
+    _deadline_at, deadline = _operation_deadline(args["deadlineAt"])
+    runtime = helper_runtime()
+    tools = _database_tools()
+    instances = _instance_client()
+    if instances.call("observe", request.instance_id).get("type") != kind:
+        raise HelperActionError("IDENTITY_MISMATCH", "storage instance type does not match")
+    credentials = instances.call("credentials", request.instance_id)
+    port, password = credentials.get("port"), credentials.get("adminPassword")
+    if (
+        credentials.get("absent") is True
+        or isinstance(port, bool)
+        or not isinstance(port, int)
+        or not isinstance(password, str)
+        or not password
+    ):
+        raise HelperActionError("INSTANCE_NOT_READY", "the database instance is unavailable")
+    host = runtime.platform.get("internalNames.storage")
+    if not isinstance(host, str):
+        raise HelperActionError("DEPENDENCY_UNAVAILABLE", "storage inventory is invalid")
+    ca = str(_nomad_secrets(runtime) / "internal-ca.pem")
+    clients = _staff_export_clients(runtime, create=True)
+    assert clients is not None
+    bucket, internal, _public = clients
+    work = ensure_private_directory(_staff_export_root(runtime) / "work", create=True)
+    staff_exports.sweep_work(work, time.time())
+    staff_exports.require_space(work)
+    taken = datetime.now(UTC)
+    directory = Path(tempfile.mkdtemp(prefix="snapshot-", dir=work))
+    try:
+        budget = staff_exports.Budget()
+        files: list[dict[str, Any]] = []
+        if kind == "mongo":
+            from pymongo import MongoClient
+
+            mongo: MongoClient[dict[str, Any]] = MongoClient(
+                host,
+                port,
+                username="platform_admin",
+                password=password,
+                authSource="admin",
+                tls=True,
+                tlsCAFile=ca,
+                serverSelectionTimeoutMS=10_000,
+                socketTimeoutMS=120_000,
+                maxPoolSize=2,
+            )
+            try:
+                files = staff_exports.write_collections(
+                    mongo[request.database], directory, budget, deadline
+                )
+            finally:
+                mongo.close()
+            # mongodump reads its password from a private file, never argv.
+            configuration = directory / "mongo-tools.json"
+            uri = (
+                f"mongodb://platform_admin:{urllib.parse.quote(password, safe='')}@{host}:{port}/"
+                f"?authSource=admin&tls=true&tlsCAFile={urllib.parse.quote(ca, safe='')}"
+                "&serverSelectionTimeoutMS=10000"
+            )
+            durable.atomic_write(
+                configuration, json.dumps({"uri": uri}).encode(), mode=0o600, maximum_bytes=65_536
+            )
+            name = "mongodump.archive.gz"
+            argv = staff_exports.mongo_dump_argv(
+                tools["mongodump"], configuration, request.database
+            )
+            environment = child_environment()
+        else:
+            name = "database.sql"
+            argv = staff_exports.postgres_dump_argv(tools["pg_dump"], host, port, request.database)
+            environment = child_environment(
+                overrides={
+                    "PGPASSWORD": password,
+                    "PGSSLMODE": "verify-full",
+                    "PGSSLROOTCERT": ca,
+                    "PGCONNECT_TIMEOUT": "10",
+                }
+            )
+        staff_exports.run_dump(
+            argv, env=environment, path=directory / name, budget=budget, deadline=deadline
+        )
+        files.append(staff_exports.describe(directory, name))
+        archive = directory / "snapshot.zip"
+        staff_exports.build_archive(
+            directory, files, staff_exports.manifest(request, taken, files), archive
+        )
+        size = archive.stat().st_size
+        digest = staff_exports.file_digest(archive)
+        key = staff_exports.object_key(request.resource_id, taken)
+        filename = staff_exports.download_name(request, taken)
+        staff_exports.upload(internal, bucket, key, archive, filename=filename, sha256=digest)
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
+    try:
+        staff_exports.sweep(internal, bucket, datetime.now(UTC))
+    except Exception:
+        # The snapshot is stored; the controller's hourly sweep retries.
+        pass
+    return {
+        "objectKey": key,
+        "filename": filename,
+        "bytes": size,
+        "sha256": digest,
+        "takenAt": staff_exports.timestamp(taken),
+    }
+
+
+def _export_link(args: Mapping[str, Any]) -> Mapping[str, Any]:
+    from . import staff_exports
+
+    _exact_args(args, {"objectKey"}, "storage.export.link")
+    key = staff_exports.checked_object_key(args["objectKey"])
+    clients = _staff_export_clients(helper_runtime(), create=False)
+    if clients is None:
+        raise HelperActionError("EXPORT_NOT_FOUND", "the snapshot has expired or was deleted")
+    bucket, internal, public = clients
+    return staff_exports.link(internal, public, bucket, key, datetime.now(UTC))
+
+
+def _export_sweep(args: Mapping[str, Any]) -> Mapping[str, Any]:
+    from . import staff_exports
+
+    _exact_args(args, set(), "storage.export.sweep")
+    runtime = helper_runtime()
+    work = ensure_private_directory(_staff_export_root(runtime) / "work", create=True)
+    staff_exports.sweep_work(work, time.time())
+    clients = _staff_export_clients(runtime, create=False)
+    if clients is None:
+        return {"deleted": 0}
+    bucket, internal, _public = clients
+    return {"deleted": staff_exports.sweep(internal, bucket, datetime.now(UTC))}
+
+
 def _lazy_storage(action: str) -> Handler:
     def handle(raw: Mapping[str, Any]) -> Mapping[str, Any]:
+        if action in {"storage.mongo.export", "storage.postgres.export"}:
+            return _storage_export(action, raw)
+        if action == "storage.export.link":
+            return _export_link(raw)
+        if action == "storage.export.sweep":
+            return _export_sweep(raw)
         if action == "storage.backup.ensure":
             _exact_args(raw, {"type", "database", "maxAgeMinutes"}, action)
             from ..database_backups import ensure_backup

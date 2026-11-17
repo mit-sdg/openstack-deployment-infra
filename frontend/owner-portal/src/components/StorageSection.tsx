@@ -26,6 +26,7 @@ import {
 } from '../api';
 import { QueryError } from './Feedback';
 import { Operation, OperationList } from './Operation';
+import { SnapshotDialog } from './StorageSnapshot';
 import { StorageUsage, StorageLimitsForm } from './StorageUsage';
 import { Status } from './Status';
 import '../pages/app-pages.css';
@@ -234,6 +235,8 @@ export function StorageSection({
   const [createdType, setCreatedType] = useState<StorageResource['type'] | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [editingLimits, setEditingLimits] = useState<string | null>(null);
+  // Staff and admins can download a snapshot of a database; owners never see it.
+  const [snapshotting, setSnapshotting] = useState<string | null>(null);
   // Right after adding a resource, open its variables prefilled with defaults.
   useEffect(() => {
     const created = storage.data?.items.find((resource) => resource.type === createdType);
@@ -300,6 +303,7 @@ export function StorageSection({
     }
   }
   const editingResource = storage.data?.items.find((item) => item.resourceId === editing);
+  const snapshotResource = storage.data?.items.find((item) => item.resourceId === snapshotting);
   const confirmingResource = storage.data?.items.find(
     (item) => item.resourceId === confirming?.resource,
   );
@@ -410,6 +414,17 @@ export function StorageSection({
                           }
                         >
                           Edit limits
+                        </Button>
+                      )}
+                      {app.data?.access === 'admin' && type !== 's3' && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label={`Download a ${labels[type]} snapshot`}
+                          disabled={!ready}
+                          onClick={() => setSnapshotting(resource.resourceId)}
+                        >
+                          Download snapshot
                         </Button>
                       )}
                       <Button
@@ -540,6 +555,14 @@ export function StorageSection({
             setEditing(null);
           }}
           onClose={() => setEditing(null)}
+        />
+      )}
+      {snapshotResource && (
+        <SnapshotDialog
+          key={snapshotResource.resourceId}
+          app={id}
+          resource={snapshotResource}
+          onClose={() => setSnapshotting(null)}
         />
       )}
       <Dialog

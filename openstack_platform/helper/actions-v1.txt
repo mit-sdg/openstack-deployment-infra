@@ -27,12 +27,15 @@ app.worker.delete
 app.worker.observe
 backup.accept
 storage.backup.ensure
+storage.export.link
+storage.export.sweep
 storage.host.observe
 storage.instances.abort
 storage.instances.available
 storage.instances.migrate
 storage.instances.network
 storage.mongo.create
+storage.mongo.export
 storage.mongo.limits
 storage.mongo.observe
 storage.mongo.remove
@@ -40,6 +43,7 @@ storage.mongo.rotate
 storage.mongo.usage
 storage.mongo.verify
 storage.postgres.create
+storage.postgres.export
 storage.postgres.limits
 storage.postgres.observe
 storage.postgres.remove

@@ -59,6 +59,8 @@ class FakeController:
         self.drop_next = False
         self.failed_next = False
         self.recovery_next = False
+        # Development fixture: snapshots finish as too large.
+        self.export_fails = False
         self.default_builder_flavor = "builder-small"
         self.builder_flavors: dict[str, str | None] = {}
         self.source_keys: dict[str, dict[str, str]] = {}
@@ -195,6 +197,9 @@ class FakeController:
             ("POST", "/v1/applications/{app}/storage", self.storage_create),
             ("POST", "/v1/storage/{resource}/verify", self.storage_action),
             ("POST", "/v1/storage/{resource}/rotate", self.storage_action),
+            ("POST", "/v1/storage/{resource}/exports", self.storage_export),
+            ("GET", "/v1/storage/{resource}/exports/{operation}", self.storage_export_status),
+            ("POST", "/v1/storage/{resource}/exports/{operation}/link", self.storage_export_link),
             ("GET", "/v1/storage/{resource}", self.storage_resource),
             ("PUT", "/v1/storage/{resource}/limits", self.storage_limits),
             ("DELETE", "/v1/storage/{resource}", self.storage_delete),
@@ -979,6 +984,101 @@ class FakeController:
             raise HttpError(404, "STORAGE_NOT_FOUND", "Storage does not exist.")
         return self.resource_operation(
             request, resource["applicationId"], "storage." + request.path.rsplit("/", 1)[1]
+        )
+
+    def storage_export(self, request: Request) -> Response:
+        replay = self.replay(request)
+        if replay:
+            return replay
+        resource = self.resources.get(request.path_parameters["resource"])
+        if resource is None:
+            raise HttpError(404, "STORAGE_NOT_FOUND", "Storage does not exist.")
+        if resource["type"] not in {"mongo", "postgres"}:
+            raise HttpError(409, "EXPORT_UNSUPPORTED", "Only databases have snapshots.")
+        if resource["lifecycleState"] != "active":
+            raise HttpError(409, "EXPORT_UNAVAILABLE", "This database can't be exported now.")
+        identifier = request.idempotency_key()
+        self.operations[identifier] = {
+            "operationId": identifier,
+            "scope": f"export-{resource['resourceId']}",
+            "kind": "storage.export",
+            "status": "running",
+            "phase": "exporting",
+            "cleanupState": "not_required",
+            "startedAt": utc(time.time()),
+            "updatedAt": utc(time.time()),
+            "ready": time.time() + self.delay,
+        }
+        return self.remember(
+            request,
+            Response(
+                202,
+                {
+                    "operationId": identifier,
+                    "statusUrl": f"/v1/operations/{identifier}",
+                    "result": {"kind": "operation", "id": identifier},
+                },
+            ),
+        )
+
+    def export_model(self, request: Request) -> dict[str, Any]:
+        resource = request.path_parameters["resource"]
+        identifier = request.path_parameters["operation"]
+        operation = self.operations.get(identifier)
+        if operation is None or operation["scope"] != f"export-{resource}":
+            raise HttpError(404, "EXPORT_NOT_FOUND", "Snapshot does not exist.")
+        model: dict[str, Any] = {
+            "operationId": identifier,
+            "resourceId": resource,
+            "status": "running",
+            "errorCode": None,
+            "startedAt": operation["startedAt"],
+            "export": None,
+        }
+        if time.time() < operation["ready"]:
+            return model
+        if operation["status"] == "running" and self.export_fails:
+            operation["status"] = "failed"
+        if operation["status"] == "failed":
+            return {**model, "status": "failed", "errorCode": "EXPORT_TOO_LARGE"}
+        operation["status"] = "succeeded"
+        taken = operation["ready"]
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(taken))
+        slug = next(
+            (
+                app["slug"]
+                for app in self.apps.values()
+                if app["applicationId"] == self.resources.get(resource, {}).get("applicationId")
+            ),
+            "app",
+        )
+        return {
+            **model,
+            "status": "succeeded",
+            "export": {
+                "filename": f"{slug}-database-{stamp}.zip",
+                "bytes": 48213,
+                "sha256": hashlib.sha256(identifier.encode()).hexdigest(),
+                "takenAt": utc(taken),
+                "expiresAt": utc(taken + 86400),
+            },
+        }
+
+    def storage_export_status(self, request: Request) -> Response:
+        return Response(200, self.export_model(request))
+
+    def storage_export_link(self, request: Request) -> Response:
+        model = self.export_model(request)
+        if model["status"] != "succeeded":
+            raise HttpError(409, "EXPORT_NOT_READY", "This snapshot has no file yet.")
+        export = model["export"]
+        return Response(
+            200,
+            {
+                "url": f"https://s3.localhost/staff-exports/{model['operationId']}.zip",
+                "expiresAt": utc(time.time() + 300),
+                **{key: export[key] for key in ("filename", "bytes", "sha256", "takenAt")},
+            },
         )
 
     def storage_resource(self, request: Request) -> Response:

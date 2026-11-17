@@ -60,6 +60,8 @@ const auditLabels: Record<string, string> = {
   app_delete_succeeded: 'App deleted',
   app_delete_blocked: 'App deletion needs attention',
   app_delete_failed: 'App deletion failed',
+  storage_snapshot_requested: 'Database snapshot requested',
+  storage_snapshot_link_issued: 'Database snapshot download link issued',
 };
 
 const purposes: Record<string, string> = {
@@ -92,6 +94,7 @@ function auditDetails(row: AdminAudit) {
   if (typeof purpose === 'string') parts.push(purposes[purpose] ?? purpose);
   if (typeof apps === 'number') parts.push(`${apps} apps`);
   if (typeof concurrentOperations === 'number') parts.push(`${concurrentOperations} at a time`);
+  if (typeof row.details.appSlug === 'string') parts.push(row.details.appSlug);
   if (typeof row.details.flavor === 'string')
     parts.push(`${row.details.expectedFlavor ?? 'Platform default'} → ${row.details.flavor}`);
   return parts.join(' · ');

@@ -44,6 +44,7 @@ SQLite and deploy-key sets have an encrypted file, plus `.sha256` and `.manifest
 - **App container images.** The registry on the storage data volume is not backed up. Managed-data sets leave its images out. After a full restore, you rebuild each app from its accepted commit. See [Rebuild app images after a full restore](#rebuild-app-images-after-a-full-restore).
 - **Runtime environment values.** Nomad's encrypted variables aren't backed up; controller records keep only names. Escrow values you can't regenerate. Managed-data sets contain S3 keys, but don't restore Nomad variables.
 - **Running infrastructure.** Backups don't recreate servers, volumes, workers, or Nomad state.
+- **Staff database snapshots.** Snapshots that staff download from the portal live in their own bucket for a day and stay out of every backup. See [Download a database snapshot](manage-apps-and-people.md#download-a-database-snapshot).
 
 ### How long sets are kept
 
