@@ -26,6 +26,12 @@ cat >"$POLICY_FILE" <<'EOF'
 namespace "*" {
   policy = "read"
   capabilities = ["read-job", "list-jobs"]
+  # The ingress's unavailable page reads non-secret maintenance markers only.
+  variables {
+    path "platform/updating/*" {
+      capabilities = ["read"]
+    }
+  }
 }
 agent {
   policy = "read"

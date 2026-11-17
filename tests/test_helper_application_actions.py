@@ -958,6 +958,55 @@ class ExactAbsenceTests(unittest.TestCase):
         self.assertFalse(_exact_absence(b"Error querying jobs: Permission denied\n", "kumba"))
 
 
+class UpdatingActionTests(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+        self.actions = handlers(
+            FakeVariableClient(),
+            nomad_command=("fixed-nomad-wrapper",),
+            command_runner=lambda argv, **bounds: self.calls.append((argv, bounds["check"])),
+            timeout_seconds=3,
+        )
+
+    def test_marks_and_clears_only_the_apps_non_secret_marker(self):
+        with mock.patch(
+            "openstack_platform.helper.application_actions.time.time", return_value=1700000000.5
+        ):
+            result = self.actions["app.updating"]({"slug": "demo-app", "updating": True})
+        self.assertEqual(result, {"slug": "demo-app", "updating": True})
+        self.actions["app.updating"]({"slug": "demo-app", "updating": False})
+        self.assertEqual(
+            self.calls,
+            [
+                (
+                    (
+                        "fixed-nomad-wrapper",
+                        "var",
+                        "put",
+                        "-force",
+                        "-out",
+                        "none",
+                        "platform/updating/demo-app",
+                        "since=1700000000",
+                    ),
+                    True,
+                ),
+                (("fixed-nomad-wrapper", "var", "purge", "platform/updating/demo-app"), False),
+            ],
+        )
+
+    def test_rejects_bad_slugs_flags_and_extra_arguments(self):
+        for args in (
+            {"slug": "../nomad/jobs/x", "updating": True},
+            {"slug": "demo-app", "updating": "yes"},
+            {"slug": "demo-app", "updating": True, "path": "nomad/jobs/demo-app"},
+            {"slug": "demo-app"},
+        ):
+            with self.subTest(args=args), self.assertRaises((HelperActionError, ValidationError)):
+                self.actions["app.updating"](args)
+        self.assertEqual(self.calls, [])
+
+
 class StopActionTests(unittest.TestCase):
     def setUp(self):
         self.variables = FakeVariableClient()

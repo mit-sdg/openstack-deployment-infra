@@ -393,7 +393,7 @@ Implemented actions must exactly match the release-bound [`actions-v1.txt`](../.
 | --- | --- |
 | Builds | `app.build`, `app.build.cleanup`, `app.build.logs`, `app.builder.delete` |
 | Workers | `app.worker.create`, `app.worker.observe`, `app.worker.capacity`, `app.worker.delete` |
-| Nomad jobs | `app.deploy`, `app.promote`, `app.health`, `app.restart`, `app.stop`, `app.remove`, `app.startup`, `app.logs` |
+| Nomad jobs | `app.deploy`, `app.promote`, `app.health`, `app.restart`, `app.stop`, `app.remove`, `app.startup`, `app.logs`, `app.updating` (maintenance marker for the ingress page) |
 | Environment | `app.env.list`, `app.env.set`, `app.env.remove` |
 | Registry | `app.manifest.retain`, `app.manifest.verify`, `app.manifest.delete` |
 | Source | `app.source.key`, `app.source.check`, `app.source.commits`, `app.source.preflight` |
@@ -514,17 +514,19 @@ Traefik routes public hostnames to the portal, app workers, and Garage. The HTTP
 
 The S3 proxy preserves `Host` so presigned URLs remain valid. Admin’s firewall and `management-web` each restrict port 8080 to the ingress address. The internal CA authenticates platform services. Private keys and deployment credentials arrive after image construction and stay out of source and the Nix store.
 
-An app's router exists only while its Nomad service is healthy. During a maintenance deploy, a restart, or a crash loop, a lowest-priority catch-all router sends the app's host to `<namespace>-app-unavailable` on the ingress instead of returning Traefik's bare 404. It runs as the `traefik` user with Traefik's read-only Nomad token and looks up the exact jobs `<app>` and `<app>-candidate` over Nomad's HTTP API, caching each answer for five seconds:
+An app's router exists only while its Nomad service is healthy. During a maintenance deploy, a restart, or a crash loop, a lowest-priority catch-all router sends the app's host to `<namespace>-app-unavailable` on the ingress instead of returning Traefik's bare 404. It runs as the `traefik` user with Traefik's read-only Nomad token and looks up the exact jobs `<app>` and `<app>-candidate` over Nomad's HTTP API, caching each answer for five seconds.
+
+A maintenance deploy removes the old job, and on a new worker deletes the old VM, before the candidate job exists, so for a few minutes the app has no job at all, the same as a stopped app. Just before it stops the old job, the controller has the helper write the Variable `platform/updating/<app>` (`app.updating`), and it purges the Variable once the new deploy is accepted. The marker holds only a timestamp. Traefik's policy may read that path and no other Variable. The page counts a marker for 20 minutes after it was written, so one left behind by a failed cutover expires on its own. Writing or clearing it never fails a deploy.
 
 | Nomad state | Response |
 | --- | --- |
-| A job is meant to run | 503 with `Retry-After: 30`: the app is updating and should be back within a few minutes |
-| No job, or only stopped jobs | 404: no app is running at this address |
+| A job is meant to run, or a recent cutover marker exists | 503 with `Retry-After: 30`: the app is updating and should be back within a few minutes |
+| Otherwise no job, or only stopped jobs | 404: no app is running at this address |
 | Nomad can't be reached | 503: the app isn't available right now |
 
 Browsers get a page that checks the address every few seconds and reloads once the response no longer carries `X-Platform-Unavailable`; other clients get JSON such as `{"error": "APP_STARTING"}`. Responses are `no-store` and never carry the deployment route marker, so health checks and deploy acceptance still see the app as down.
 
-Implementation: [`ingress.nix`](../../nix/roles/ingress.nix), [`admin.nix`](../../nix/roles/admin.nix), [`app_unavailable.py`](../../infra/ingress/app_unavailable.py), and [`nomad_jobs.py`](../../openstack_platform/controller/nomad_jobs.py).
+Implementation: [`ingress.nix`](../../nix/roles/ingress.nix), [`admin.nix`](../../nix/roles/admin.nix), [`app_unavailable.py`](../../infra/ingress/app_unavailable.py), [`nomad_jobs.py`](../../openstack_platform/controller/nomad_jobs.py), [`maintenance.py`](../../openstack_platform/controller/maintenance.py), and the Traefik policy in [`bootstrap_acl.sh`](../../infra/nomad/bootstrap_acl.sh).
 
 ## Storage instances
 

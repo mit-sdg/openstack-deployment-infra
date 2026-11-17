@@ -2254,7 +2254,7 @@ class DeploymentService:
             build: app.DeploymentBuild,
             worker: app.DeploymentWorker,
         ) -> app.DeploymentResult:
-            return _deploy_and_accept_application(
+            result = _deploy_and_accept_application(
                 self.connection,
                 self.config,
                 spec,
@@ -2265,6 +2265,17 @@ class DeploymentService:
                 deadline=selected_deadline,
                 state_directory=self.state_directory,
             )
+            if request.maintenance:
+                from .maintenance import mark_updating
+
+                mark_updating(
+                    self.config,
+                    application_slug,
+                    False,
+                    helper_caller=self.helper_caller,
+                    deadline=selected_deadline,
+                )
+            return result
 
         def verify_project() -> None:
             from .fixed_ip_service import require_maintenance
