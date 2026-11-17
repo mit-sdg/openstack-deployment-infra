@@ -435,6 +435,7 @@ class ProductionExportTests(unittest.TestCase):
         self.assertEqual(
             stored["ContentDisposition"], f'attachment; filename="{result["filename"]}"'
         )
+        self.assertEqual(stored["CacheControl"], "private, no-store")
         self.assertEqual(len(stored["body"]), result["bytes"])
         with zipfile.ZipFile(io.BytesIO(stored["body"])) as opened:
             self.assertEqual(opened.read("database.sql"), b"create table x;")

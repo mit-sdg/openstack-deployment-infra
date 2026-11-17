@@ -457,6 +457,8 @@ def upload(client: Any, bucket: str, key: str, path: Path, *, filename: str, sha
             ContentLength=size,
             ContentType="application/zip",
             ContentDisposition=f'attachment; filename="{filename}"',
+            # Downloads pass through the public edge; no cache may keep a copy.
+            CacheControl="private, no-store",
             Metadata={"sha256": sha256},
         )
     if int(client.head_object(Bucket=bucket, Key=key)["ContentLength"]) != size:
