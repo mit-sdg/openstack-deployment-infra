@@ -208,9 +208,11 @@ if not isinstance(rows,list) or len(rows)!=1 or not isinstance(rows[0],dict) or 
     fi
     # Preserve the latest liveness evidence, including an unknown result after
     # failure. Never let the earlier full snapshot hide a newer negative read.
+    # The Nomad registration below proves bootstrap finished: the provider
+    # keeps a bounded console log, so a long-running worker loses its boot
+    # marker and would otherwise read as never ready.
     status=$("$OSC" server show "$server_id" -f value -c status) || status=""
-    if [[ $status == ACTIVE ]] &&
-       "$OSC" console log show --lines 2000 "$server_id" | grep -Fq "$BOOTSTRAP_MARKER"; then ready=true; fi
+    if [[ $status == ACTIVE ]]; then ready=true; fi
   else printf 'null' >"$server_json"; fi
   if [[ $ready == true ]]; then
     ready=false

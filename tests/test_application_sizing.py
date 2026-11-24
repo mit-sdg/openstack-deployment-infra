@@ -297,6 +297,16 @@ class ApplicationSizingTests(unittest.TestCase):
         )
         self.assertFalse(any(action == "app.promote" for action, _ in self.calls))
 
+    def test_stopping_an_app_deletes_a_worker_that_no_longer_reports_ready(self):
+        _, deployed = self.deploy()
+        self.assertEqual(deployed.status, "succeeded", deployed.safe_error)
+        for worker in self.workers.values():
+            worker["ready"] = False
+        _, disabled = self.post(f"/v1/applications/{self.app_id}/disable", {})
+        self.assertEqual(disabled.status, "succeeded", disabled.safe_error)
+        self.assertEqual(self.workers, {})
+        self.assertFalse(db.get_application(self.connection, self.app_id).desired_running)
+
     def test_custom_flavor_first_deployment_and_student_plan_is_not_public(self):
         plan = self.plan()
         self.assertIsNone(plan["deploymentId"])

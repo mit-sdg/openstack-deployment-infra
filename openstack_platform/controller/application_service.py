@@ -97,8 +97,12 @@ class ApplicationService:
         )
         return ApplicationCreated(identifier, checked_slug, url, False)
 
-    def _worker_identity(self, result: Mapping[str, object]) -> tuple[str, str, str, str]:
-        if result.get("ready") is not True or result.get("absent") is True:
+    def _worker_identity(
+        self, result: Mapping[str, object], *, ready: bool = True
+    ) -> tuple[str, str, str, str]:
+        # Deleting a worker needs only its identity: a broken worker must
+        # still be removable when its app is stopped.
+        if result.get("absent") is True or (ready and result.get("ready") is not True):
             raise app.ApplicationError("worker readiness was not confirmed")
         return (
             uuid(result.get("serverId"), field="worker server UUID"),
@@ -272,7 +276,7 @@ class ApplicationService:
                     deadline=deadline,
                 )
                 if observed.get("absent") is not True:
-                    identity = self._worker_identity(observed)
+                    identity = self._worker_identity(observed, ready=False)
                     if (
                         identity[0] != refs["worker_server_id"]
                         or identity[2] != refs["worker_port_id"]
